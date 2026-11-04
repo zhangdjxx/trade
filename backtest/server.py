@@ -11,9 +11,10 @@ from urllib.parse import urlparse, parse_qs
 
 from .okx import OKX, Cancelled
 from .runner import run
+from .engine import Strategy
 
 ROOT = Path(__file__).resolve().parent
-FIELDS = ["day", "symbol", "day_open", "threshold", "notional_usdt", "entry_time", "entry_price", "quantity",
+FIELDS = ["day", "symbol", "entry_pct", "take_profit_pct", "stop_loss_pct", "day_open", "threshold", "notional_usdt", "entry_time", "entry_price", "quantity",
           "take_profit", "stop_loss", "exit_time", "exit_price", "status", "pnl_usdt", "ambiguity_time", "note"]
 
 
@@ -119,6 +120,7 @@ def make_handler(jobs):
                 if self.path == "/api/run":
                     if any(not isinstance(v, str) for v in config.values()):
                         raise ValueError("参数必须为字符串")
+                    Strategy.from_config(config)
                     return self.send(HTTPStatus.ACCEPTED, {"id": jobs.start(config)})
                 if self.path == "/api/cancel":
                     with jobs.lock:

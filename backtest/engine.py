@@ -1,11 +1,52 @@
 """Conservative OHLC simulation. All calculations use Decimal, timestamps are UTC ms."""
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 TZ = timezone(timedelta(hours=8))
 MINUTE = 60_000
 DAY = 86_400_000
+
+
+@dataclass(frozen=True)
+class Strategy:
+    entry_pct: Decimal = Decimal("10")
+    take_profit_pct: Decimal = Decimal("3")
+    stop_loss_pct: Decimal = Decimal("6")
+
+    def __post_init__(self):
+        for name, label, upper in (("entry_pct", "买入涨幅", None),
+                                   ("take_profit_pct", "止盈比例", None),
+                                   ("stop_loss_pct", "止损比例", Decimal("100"))):
+            try:
+                value = Decimal(str(getattr(self, name)))
+            except (InvalidOperation, ValueError):
+                raise ValueError(f"{label}必须是有效数字") from None
+            if not value.is_finite() or value <= 0 or (upper is not None and value >= upper):
+                raise ValueError(f"{label}必须大于0" + ("且小于100%" if upper else ""))
+            if value > Decimal("1000000") or value.as_tuple().exponent < -6:
+                raise ValueError(f"{label}最多支持6位小数，且不能超过1000000%")
+            object.__setattr__(self, name, value)
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**{key: config.get(key, str(default)) for key, default in
+                     (("entry_pct", 10), ("take_profit_pct", 3), ("stop_loss_pct", 6))})
+
+    def as_dict(self):
+        return {key: str(getattr(self, key)) for key in ("entry_pct", "take_profit_pct", "stop_loss_pct")}
+
+    @property
+    def entry_factor(self):
+        return 1 + self.entry_pct / 100
+
+    @property
+    def profit_factor(self):
+        return 1 + self.take_profit_pct / 100
+
+    @property
+    def stop_factor(self):
+        return 1 - self.stop_loss_pct / 100
 
 
 def date_ms(value):
@@ -35,14 +76,15 @@ class Candle:
         return cls(ts, o, h, l, c)
 
 
-def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=lambda: None):
+def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=lambda: None, *, strategy=None):
     """following_days lazily yields (day_start, candles). Never invent intrabar order."""
-    threshold = baseline * Decimal("1.10")
+    strategy = strategy or Strategy()
+    threshold = baseline * strategy.entry_factor
     trade = {
         "day": stamp(day)[:10], "symbol": inst, "day_open": str(baseline),
         "threshold": str(threshold), "entry_time": None, "entry_price": None,
         "exit_time": None, "exit_price": None, "status": "data_error",
-        "pnl_usdt": None, "note": "", "notional_usdt": "10000",
+        "pnl_usdt": None, "note": "", "notional_usdt": "10000", **strategy.as_dict(),
     }
     entry = None
 
@@ -64,9 +106,9 @@ def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=l
                 entry = max(c.open, threshold)
                 trade.update(entry_time=stamp(c.ts), entry_price=str(entry),
                              quantity=str(Decimal("10000") / entry),
-                             take_profit=str(entry * Decimal("1.03")),
-                             stop_loss=str(entry * Decimal("0.94")))
-            tp, sl = entry * Decimal("1.03"), entry * Decimal("0.94")
+                             take_profit=str(entry * strategy.profit_factor),
+                             stop_loss=str(entry * strategy.stop_factor))
+            tp, sl = entry * strategy.profit_factor, entry * strategy.stop_factor
             # In later candles the opening tick occurs before either extreme.
             if not entering and (c.open >= tp or c.open <= sl):
                 win = c.open >= tp

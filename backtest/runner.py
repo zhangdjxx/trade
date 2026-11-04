@@ -1,11 +1,11 @@
 import time
 from collections import Counter
-from decimal import Decimal
 
-from .engine import DAY, MINUTE, date_ms, simulate, stamp
+from .engine import DAY, MINUTE, Strategy, date_ms, simulate, stamp
 
 
 def run(client, config, progress=lambda message, **values: None):
+    strategy = Strategy.from_config(config)
     start = date_ms(config.get("start", "2026-01-01"))
     end = date_ms(config.get("end", "2026-11-03")) + DAY
     cutoff = int(time.time() * 1000) // MINUTE * MINUTE
@@ -25,13 +25,14 @@ def run(client, config, progress=lambda message, **values: None):
     if not universe:
         raise RuntimeError("未读取到任何 USDT 永续合约，不能生成有效回测")
     result = {
-        "config": {"start": stamp(start), "end_exclusive": stamp(end), "observation_cutoff": stamp(cutoff)},
+        "config": {"start": stamp(start), "end_exclusive": stamp(end), "observation_cutoff": stamp(cutoff), **strategy.as_dict()},
         "trades": [], "errors": [], "universe": [r["instId"] for r in universe],
         "coverage": {"expected_days": 0, "checked_days": 0, "eligible_days": 0, "excluded_listing_days": 0},
         "warnings": [
             "仅覆盖本次 OKX 当前合约列表，可能遗漏已下架合约，存在幸存者偏差。",
             "以成交价分钟K线模拟，时间精度为一分钟，非逐笔成交；触发价/成交量/实际成交不保证。",
-            "UTC+8 日开盘价为基准，日内首次严格超过10%触发；触发价按10%边界估算，跳空按开盘价。",
+            f"UTC+8 日开盘价为基准，日内首次严格超过{strategy.entry_pct}%触发；按边界估算买入价，跳空按开盘价。",
+            f"相对买入价上涨{strategy.take_profit_pct}%止盈，下跌{strategy.stop_loss_pct}%止损。",
             "每币对每天最多一笔；跨天未退出时，次日仍可独立新开一笔，可存在重叠持仓。",
             "每笔10000 USDT名义本金，允许碎数数量；未计手续费、滑点、资金费、保证金和资金上限。",
             "止盈止损同分钟或开仓分钟低点先后不明时标为顺序不明，不强行判胜负。",
@@ -66,7 +67,7 @@ def run(client, config, progress=lambda message, **values: None):
                 result["errors"].append({"symbol": inst, "day": stamp(day)[:10], "error": "缺少完整UTC+8日线，不能认定当天无信号"})
                 continue
             result["coverage"]["checked_days"] += 1
-            if candle.high <= candle.open * Decimal("1.10"):
+            if candle.high <= candle.open * strategy.entry_factor:
                 continue
             result["coverage"]["eligible_days"] += 1
             progress(f"{i + 1}/{len(universe)} · {inst} · {stamp(day)[:10]}：追踪分钟线", completed=i, total=len(universe))
@@ -77,13 +78,13 @@ def run(client, config, progress=lambda message, **values: None):
                 def following():
                     for nxt in range(day + DAY, cutoff, DAY):
                         yield nxt, client.candles(inst, "1m", nxt, min(nxt + DAY, cutoff))
-                trade = simulate(inst, day, candle.open, entry_candles, following(), cutoff, client.check)
+                trade = simulate(inst, day, candle.open, entry_candles, following(), cutoff, client.check, strategy=strategy)
                 result["trades"].append(trade)
             except Exception as exc:
                 from .okx import Cancelled
                 if isinstance(exc, Cancelled):
                     raise
-                result["trades"].append({"day": stamp(day)[:10], "symbol": inst, "status": "data_error", "note": str(exc)})
+                result["trades"].append({"day": stamp(day)[:10], "symbol": inst, "status": "data_error", "note": str(exc), **strategy.as_dict()})
         progress(f"已完成 {inst}", completed=i + 1, total=len(universe), trades=len(result["trades"]))
     result["trades"].sort(key=lambda t: (t["day"], t["symbol"]))
     result["summary"] = dict(Counter(t["status"] for t in result["trades"]))

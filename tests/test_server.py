@@ -94,6 +94,48 @@ class HTTPTests(unittest.TestCase):
             self.post("/api/run", {}, "https://unrelated.example")
         self.assertEqual(origin.exception.code, 403)
 
+    def test_custom_parameters_reach_engine_and_exports(self):
+        with patch("backtest.server.OKX", SyntheticOKX), patch("backtest.runner.time.time", return_value=(START + 3 * DAY) / 1000):
+            self.post("/api/run", {"start": "2026-01-01", "end": "2026-01-01",
+                                   "entry_pct": "9.5", "take_profit_pct": "2.5", "stop_loss_pct": "4.5"})
+            for _ in range(200):
+                state = json.loads(self.get("/api/job"))
+                if state["state"] != "running":
+                    break
+                threading.Event().wait(.01)
+        self.assertEqual(state["state"], "done", state)
+        result = state["result"]
+        self.assertEqual(result["summary"], {"success": 1})
+        trade = result["trades"][0]
+        self.assertEqual(trade["entry_price"], "109.500")
+        self.assertEqual(trade["take_profit"], "112.237500")
+        self.assertEqual(trade["stop_loss"], "104.572500")
+        self.assertEqual(trade["pnl_usdt"], "250.000")
+        self.assertEqual(result["config"]["entry_pct"], "9.5")
+        exported = list(csv.DictReader(io.StringIO(self.get("/api/export").decode("utf-8-sig"))))
+        for key, value in (("entry_pct", "9.5"), ("take_profit_pct", "2.5"), ("stop_loss_pct", "4.5")):
+            self.assertEqual(exported[0][key], value)
+
+    def test_daily_screen_uses_custom_entry_threshold(self):
+        with patch("backtest.server.OKX", SyntheticOKX), patch("backtest.runner.time.time", return_value=(START + 3 * DAY) / 1000):
+            self.post("/api/run", {"start": "2026-01-01", "end": "2026-01-01", "entry_pct": "15"})
+            for _ in range(200):
+                state = json.loads(self.get("/api/job"))
+                if state["state"] != "running":
+                    break
+                threading.Event().wait(.01)
+        self.assertEqual(state["state"], "done", state)
+        self.assertTrue(state["result"]["complete"])
+        self.assertEqual(state["result"]["coverage"]["eligible_days"], 0)
+        self.assertEqual(state["result"]["trades"], [])
+
+    def test_invalid_percent_rejected_before_start(self):
+        for params in ({"entry_pct":"0"}, {"take_profit_pct":"NaN"}, {"stop_loss_pct":"100"}):
+            with self.subTest(params=params), self.assertRaises(HTTPError) as bad:
+                self.post("/api/run", params)
+            self.assertEqual(bad.exception.code, 400)
+        self.assertEqual(self.jobs.snapshot()["state"], "idle")
+
     def test_empty_exports_are_not_success(self):
         with self.assertRaises(HTTPError) as absent:
             self.get("/api/export")

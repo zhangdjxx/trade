@@ -1,7 +1,7 @@
 import unittest
 from decimal import Decimal as D
 
-from backtest.engine import Candle, DAY, MINUTE, date_ms, simulate, stamp
+from backtest.engine import Candle, DAY, MINUTE, Strategy, date_ms, simulate, stamp
 
 START = date_ms("2026-01-01")
 
@@ -16,6 +16,35 @@ def simulate_rows(rows, cutoff=None, following=()):
 
 
 class EngineTests(unittest.TestCase):
+    def test_custom_entry_and_profit_percent(self):
+        rows = [c(0, h="104"), c(1, o="104", h="106", l="103", close="105"),
+                c(2, o="105", h="108", l="104", close="107")]
+        strategy = Strategy("5", "2.5", "4")
+        r = simulate("TEST", START, D("100"), rows, [], START + 3 * MINUTE, strategy=strategy)
+        self.assertEqual(D(r["entry_price"]), D("105"))
+        self.assertEqual(D(r["take_profit"]), D("107.625"))
+        self.assertEqual(D(r["stop_loss"]), D("100.8"))
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(D(r["pnl_usdt"]), D("250"))
+        self.assertEqual(r["entry_pct"], "5")
+
+    def test_custom_stop_percent(self):
+        rows = [c(0, o="109", h="111", l="109", close="110"),
+                c(1, o="110", h="111", l="107", close="108")]
+        r = simulate("TEST", START, D("100"), rows, [], START + 2 * MINUTE,
+                     strategy=Strategy("10", "4", "2.5"))
+        self.assertEqual(r["status"], "failure")
+        self.assertEqual(D(r["exit_price"]), D("107.25"))
+        self.assertEqual(D(r["pnl_usdt"]), D("-250"))
+
+    def test_invalid_strategy_parameters(self):
+        for key, value in (("entry_pct", "0"), ("take_profit_pct", "-1"),
+                           ("stop_loss_pct", "100"), ("entry_pct", "NaN"),
+                           ("entry_pct", "Infinity"), ("take_profit_pct", "abc"),
+                           ("entry_pct", "0.0000001")):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                Strategy.from_config({key: value})
+
     def test_timezone(self):
         self.assertEqual(START, 1767196800000)
         self.assertEqual(stamp(START), "2026-01-01T00:00+08:00")
