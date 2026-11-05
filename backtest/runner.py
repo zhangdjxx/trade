@@ -82,7 +82,7 @@ def run(client, config, progress=lambda message, **values: None):
             if candle.high <= candle.open * strategy.entry_factor:
                 continue
             result["coverage"]["eligible_days"] += 1
-            progress(f"{i + 1}/{len(universe)} · {inst} · {stamp(day)[:10]}：追踪分钟线", completed=i, total=len(universe))
+            progress(f"{i + 1}/{len(universe)} · {inst} · {stamp(day)[:10]}：计算交易（优先复用本地缓存）", completed=i, total=len(universe))
             try:
                 entry_candles = client.candles(inst, "1m", day, day + DAY)
                 if entry_candles and entry_candles[0].ts == day and entry_candles[0].open != candle.open:
