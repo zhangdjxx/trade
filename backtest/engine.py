@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from typing import Callable, Optional
 
 TZ = timezone(timedelta(hours=8))
 MINUTE = 60_000
@@ -76,6 +77,13 @@ class Candle:
         return cls(ts, o, h, l, c)
 
 
+@dataclass(frozen=True)
+class HoldingDay:
+    """A full daily candle can prove that neither exit was touched."""
+    daily: Optional[Candle]
+    load_minutes: Callable
+
+
 def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=lambda: None, *, strategy=None):
     """following_days lazily yields (day_start, candles). Never invent intrabar order."""
     strategy = strategy or Strategy()
@@ -84,7 +92,7 @@ def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=l
         "day": stamp(day)[:10], "symbol": inst, "day_open": str(baseline),
         "threshold": str(threshold), "entry_time": None, "entry_price": None,
         "exit_time": None, "exit_price": None, "status": "data_error",
-        "pnl_usdt": None, "note": "", "notional_usdt": "10000", **strategy.as_dict(),
+        "pnl_usdt": None, "note": "", "notional_usdt": "10000", "holding_days_skipped": 0, **strategy.as_dict(),
     }
     entry = None
 
@@ -139,6 +147,15 @@ def simulate(inst, day, baseline, entry_candles, following_days, cutoff, check=l
         return trade
     try:
         for next_day, candles in following_days:
+            check()
+            if isinstance(candles, HoldingDay):
+                daily = candles.daily
+                if (daily is not None and daily.ts == next_day and next_day + DAY <= cutoff
+                        and daily.high < entry * strategy.profit_factor
+                        and daily.low > entry * strategy.stop_factor):
+                    trade["holding_days_skipped"] += 1
+                    continue
+                candles = candles.load_minutes()
             if scan(next_day, candles, min(next_day + DAY, cutoff)):
                 return trade
     except Exception as exc:

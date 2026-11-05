@@ -1,7 +1,8 @@
 import unittest
 from decimal import Decimal as D
 
-from backtest.engine import Candle, DAY, MINUTE, Strategy, date_ms, simulate, stamp
+from backtest.engine import Candle, DAY, MINUTE, HoldingDay, Strategy, date_ms, simulate, stamp
+from unittest.mock import Mock
 
 START = date_ms("2026-01-01")
 
@@ -16,6 +17,51 @@ def simulate_rows(rows, cutoff=None, following=()):
 
 
 class EngineTests(unittest.TestCase):
+    def holding_entry(self):
+        return [c(0, o="108", h="111", l="105", close="110")] + [
+            c(i, o="110", h="111", l="109", close="110") for i in range(1, 1440)]
+
+    def test_quiet_day_matches_full_minutes_without_download(self):
+        entry = self.holding_entry()
+        quiet_minutes = [c(i, o="110", h="112", l="108", close="110") for i in range(1440, 2880)]
+        exit_minutes = [c(2880, o="110", h="114", l="109", close="113")]
+        plain = simulate_rows(entry, START + 2 * DAY + MINUTE,
+                              [(START + DAY, quiet_minutes), (START + 2 * DAY, exit_minutes)])
+        loader = Mock(side_effect=AssertionError("Quiet day should not download minutes"))
+        fast = simulate_rows(entry, START + 2 * DAY + MINUTE,
+                             [(START + DAY, HoldingDay(c(1440, o="110", h="112", l="108", close="110"), loader)),
+                              (START + 2 * DAY, exit_minutes)])
+        loader.assert_not_called()
+        self.assertEqual(fast["holding_days_skipped"], 1)
+        self.assertEqual({k:v for k,v in plain.items() if k != "holding_days_skipped"},
+                         {k:v for k,v in fast.items() if k != "holding_days_skipped"})
+
+    def test_tighter_custom_exit_requires_minutes(self):
+        for strategy, daily, minute in (
+            (Strategy("10", "1", "6"), c(1440, o="110", h="112", l="109", close="111"),
+             c(1440, o="110", h="112", l="109", close="111")),
+            (Strategy("10", "3", "1"), c(1440, o="110", h="111", l="108", close="109"),
+             c(1440, o="110", h="111", l="108", close="109")),
+            (Strategy("10", "3", "6"), c(1440, o="110", h="113.3", l="109", close="113"),
+             c(1440, o="110", h="113.3", l="109", close="113")),
+        ):
+            # Entry day must not touch either tighter exit.
+            entry = [c(0, o="109.5", h="110.5", l="109.4", close="110")]
+            entry += [c(i, o="110", h="110.5", l="109.4", close="110") for i in range(1,1440)]
+            loader = Mock(return_value=[minute])
+            r = simulate("TEST", START, D("100"), entry, [(START + DAY, HoldingDay(daily, loader))],
+                         START + 2 * DAY, strategy=strategy)
+            loader.assert_called_once()
+            self.assertIn(r["status"], ("success", "failure"))
+            self.assertEqual(r["holding_days_skipped"], 0)
+
+    def test_partial_day_cannot_use_daily_shortcut(self):
+        loader = Mock(return_value=[])
+        r = simulate_rows(self.holding_entry(), START + DAY + MINUTE,
+                          [(START + DAY, HoldingDay(c(1440, o="110", h="111", l="109", close="110"), loader))])
+        loader.assert_called_once()
+        self.assertEqual(r["status"], "data_error")
+
     def test_custom_entry_and_profit_percent(self):
         rows = [c(0, h="104"), c(1, o="104", h="106", l="103", close="105"),
                 c(2, o="105", h="108", l="104", close="107")]

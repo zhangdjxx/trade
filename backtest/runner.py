@@ -1,7 +1,7 @@
 import time
 from collections import Counter
 
-from .engine import DAY, MINUTE, Strategy, date_ms, simulate, stamp
+from .engine import DAY, MINUTE, HoldingDay, Strategy, date_ms, simulate, stamp
 
 
 def run(client, config, progress=lambda message, **values: None):
@@ -60,6 +60,18 @@ def run(client, config, progress=lambda message, **values: None):
             result["errors"].append({"symbol": inst, "day": None, "error": str(exc)})
             continue
         by_day = {c.ts: c for c in daily}
+        tail_loaded = False
+        last_complete_day = ((cutoff + 8 * 3_600_000) // DAY) * DAY - 8 * 3_600_000
+        def holding_daily(nxt):
+            nonlocal tail_loaded
+            if nxt >= end and not tail_loaded:
+                tail_loaded = True
+                if end < last_complete_day:
+                    try:
+                        by_day.update({c.ts: c for c in client.candles(inst, "1D", end, last_complete_day)})
+                    except Exception:
+                        client.check()  # Missing optimization data falls back to minute history.
+            return by_day.get(nxt)
         for day in expected:
             client.check()
             candle = by_day.get(day)
@@ -77,7 +89,8 @@ def run(client, config, progress=lambda message, **values: None):
                     raise ValueError("日线和分钟线零点开盘价不一致，拒绝使用错误基准")
                 def following():
                     for nxt in range(day + DAY, cutoff, DAY):
-                        yield nxt, client.candles(inst, "1m", nxt, min(nxt + DAY, cutoff))
+                        yield nxt, HoldingDay(holding_daily(nxt),
+                            lambda nxt=nxt: client.candles(inst, "1m", nxt, min(nxt + DAY, cutoff)))
                 trade = simulate(inst, day, candle.open, entry_candles, following(), cutoff, client.check, strategy=strategy)
                 result["trades"].append(trade)
             except Exception as exc:
@@ -90,4 +103,6 @@ def run(client, config, progress=lambda message, **values: None):
     result["summary"] = dict(Counter(t["status"] for t in result["trades"]))
     result["complete"] = not result["errors"] and not result["summary"].get("data_error")
     result["requests"] = client.requests
+    result["cache_hits"] = getattr(client, "cache_hits", 0)
+    result["holding_days_skipped"] = sum(t.get("holding_days_skipped", 0) for t in result["trades"])
     return result

@@ -38,7 +38,12 @@ class Jobs:
                 with self.lock:
                     job.update(message=message, **values)
             try:
-                result = run(OKX(self.cache / "candles", stop), config, progress)
+                client = OKX(self.cache / "candles", stop)
+                def activity(**values):
+                    with self.lock:
+                        job.update(**values)
+                client.on_activity = activity
+                result = run(client, config, progress)
                 target = self.cache / (job["id"] + ".json")
                 target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
                 with self.lock:
