@@ -1,6 +1,6 @@
 # OKX USDT 永续策略回测
 
-原来的 CoinWorldCap 落地页保留在根目录 `index.html`。新的回测页面与 Python 服务在 `backtest/`，无需 API Key 或第三方 Python 包。
+新的回测页面与 Python 服务在 `backtest/`，无需 API Key 或第三方 Python 包。
 
 ## 启动
 
