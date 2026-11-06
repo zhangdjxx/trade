@@ -141,6 +141,36 @@ class HTTPTests(unittest.TestCase):
             self.get("/api/export")
         self.assertEqual(absent.exception.code, 404)
 
+    def test_compare_endpoint_and_summary_and_trade_exports(self):
+        class FollowingOKX(SyntheticOKX):
+            def candles(self, inst, bar, start, end):
+                if bar == "1m" and start > START:
+                    return [Candle.parse([ts, "110", "110.1", "109.9", "110"]) for ts in range(start,end,MINUTE)]
+                return super().candles(inst,bar,start,end)
+        with patch("backtest.server.OKX", FollowingOKX), patch("backtest.compare.time.time", return_value=(START + 3 * DAY) / 1000):
+            self.post("/api/compare", {"start":"2026-01-01", "end":"2026-01-01"})
+            for _ in range(400):
+                state = json.loads(self.get("/api/job"))
+                if state["state"] != "running":
+                    break
+                threading.Event().wait(.01)
+        self.assertEqual(state["state"], "done", state)
+        result = state["result"]
+        self.assertEqual(len(result["rows"]), 11)
+        self.assertEqual(len(result["runs"]), 11)
+        self.assertEqual(result["best_entry_pcts"], ["10", "11"])
+        self.assertTrue(all(r["config"]["take_profit_pct"]=="2" for r in result["runs"]))
+        self.assertEqual(len({r["config"]["observation_cutoff"] for r in result["runs"]}), 1)
+        summary = list(csv.DictReader(io.StringIO(self.get("/api/export").decode("utf-8-sig"))))
+        self.assertEqual(len(summary), 11)
+        self.assertEqual(summary[0]["entry_pct"], "10")
+        self.assertEqual(summary[0]["win_rate_pct"], "100")
+        trades = list(csv.DictReader(io.StringIO(self.get("/api/export?format=trades&entry_pct=10").decode("utf-8-sig"))))
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["entry_pct"], "10")
+        self.assertEqual(trades[0]["take_profit_pct"], "2")
+        self.assertEqual(json.loads(self.get("/api/export?format=json")), result)
+
 
 if __name__ == "__main__":
     unittest.main()

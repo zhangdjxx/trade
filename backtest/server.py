@@ -12,10 +12,13 @@ from urllib.parse import urlparse, parse_qs
 from .okx import OKX, Cancelled
 from .runner import run
 from .engine import Strategy
+from .compare import run_comparison
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = ["day", "symbol", "entry_pct", "take_profit_pct", "stop_loss_pct", "day_open", "threshold", "notional_usdt", "entry_time", "entry_price", "quantity",
           "take_profit", "stop_loss", "exit_time", "exit_price", "status", "pnl_usdt", "ambiguity_time", "note"]
+COMPARE_FIELDS = ["rank", "entry_pct", "take_profit_pct", "stop_loss_pct", "total", "success", "failure", "resolved",
+                  "win_rate_pct", "ambiguous", "open", "data_error", "complete", "realized_pnl_usdt"]
 
 
 class Jobs:
@@ -25,12 +28,12 @@ class Jobs:
         self.lock = threading.RLock()
         self.current = None
 
-    def start(self, config):
+    def start(self, config, *, compare=False):
         with self.lock:
             if self.current and self.current["state"] == "running":
                 raise ValueError("已有回测运行中，请先取消或等待完成")
             stop = threading.Event()
-            job = {"id": uuid.uuid4().hex, "state": "running", "message": "启动中", "result": None, "stop": stop}
+            job = {"id": uuid.uuid4().hex, "state": "running", "message": "启动中", "result": None, "stop": stop, "mode":"compare" if compare else "single"}
             self.current = job
 
         def work():
@@ -43,7 +46,7 @@ class Jobs:
                     with self.lock:
                         job.update(**values)
                 client.on_activity = activity
-                result = run(client, config, progress)
+                result = (run_comparison if compare else run)(client, config, progress)
                 target = self.cache / (job["id"] + ".json")
                 target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
                 with self.lock:
@@ -93,18 +96,26 @@ def make_handler(jobs):
                 result = state.get("result")
                 if not result:
                     return self.send(404, {"error": "没有已完成的回测结果"})
-                if parse_qs(parsed.query).get("format") == ["json"]:
+                query = parse_qs(parsed.query)
+                if query.get("format") == ["json"]:
                     return self.send(200, result, attachment="okx-backtest.json")
                 buf = io.StringIO()
                 buf.write("\ufeff")
-                writer = csv.DictWriter(buf, fieldnames=FIELDS, extrasaction="ignore")
+                is_comparison = result.get("mode") == "compare"
+                detailed = query.get("format") == ["trades"]
+                if is_comparison and detailed:
+                    chosen = query.get("entry_pct", [None])[0]
+                    records = (t for run in result["runs"] if chosen is None or run["config"]["entry_pct"] == chosen for t in run["trades"])
+                else:
+                    records = result["rows"] if is_comparison else result["trades"]
+                writer = csv.DictWriter(buf, fieldnames=COMPARE_FIELDS if is_comparison and not detailed else FIELDS, extrasaction="ignore")
                 writer.writeheader()
-                for trade in result["trades"]:
+                for trade in records:
                     # Neutralize formula injection if external data becomes spreadsheet content.
                     safe = {k: ("'" + v if isinstance(v, str) and v.startswith(("=", "+", "@", "\t", "\r")) else v)
                             for k, v in trade.items()}
                     writer.writerow(safe)
-                return self.send(200, buf.getvalue(), "text/csv; charset=utf-8", "okx-trades.csv")
+                return self.send(200, buf.getvalue(), "text/csv; charset=utf-8", "okx-comparison.csv" if is_comparison and not detailed else "okx-trades.csv")
             return self.send(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -122,11 +133,12 @@ def make_handler(jobs):
                 config = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(config, dict):
                     raise ValueError("请求格式错误")
-                if self.path == "/api/run":
+                if self.path in ("/api/run", "/api/compare"):
                     if any(not isinstance(v, str) for v in config.values()):
                         raise ValueError("参数必须为字符串")
-                    Strategy.from_config(config)
-                    return self.send(HTTPStatus.ACCEPTED, {"id": jobs.start(config)})
+                    if self.path == "/api/run":
+                        Strategy.from_config(config)
+                    return self.send(HTTPStatus.ACCEPTED, {"id": jobs.start(config, compare=self.path == "/api/compare")})
                 if self.path == "/api/cancel":
                     with jobs.lock:
                         if jobs.current:

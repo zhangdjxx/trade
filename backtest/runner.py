@@ -4,11 +4,11 @@ from collections import Counter
 from .engine import DAY, MINUTE, HoldingDay, Strategy, date_ms, simulate, stamp
 
 
-def run(client, config, progress=lambda message, **values: None):
+def run(client, config, progress=lambda message, **values: None, *, observation_cutoff=None):
     strategy = Strategy.from_config(config)
     start = date_ms(config.get("start", "2026-01-01"))
     end = date_ms(config.get("end", "2026-11-03")) + DAY
-    cutoff = int(time.time() * 1000) // MINUTE * MINUTE
+    cutoff = observation_cutoff if observation_cutoff is not None else int(time.time() * 1000) // MINUTE * MINUTE
     if end <= start or end > cutoff:
         raise ValueError("日期无效：结束日期必须是不晚于昨天（UTC+8）的完整交易日")
     if (end - start) // DAY > 1096:
